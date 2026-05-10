@@ -1,4 +1,3 @@
-# backend/rag.py
 import os
 import chromadb
 from sentence_transformers import SentenceTransformer
@@ -46,27 +45,199 @@ def _get_gemini_model():
         system_instruction=SYSTEM_PROMPT
     )
 
-# ─── Loaders ──────────────────────────────────────────────────────────────────
+# ─── Loaders individuales ─────────────────────────────────────────────────────
 
-LOADERS = {
-    "pdf":  PyPDFLoader,
-    "docx": Docx2txtLoader,
-    "doc":  Docx2txtLoader,
-    "txt":  lambda p: TextLoader(p, encoding="utf-8"),
-    "csv":  lambda p: CSVLoader(p, encoding="utf-8"),
-    "xlsx": UnstructuredExcelLoader,
-    "xls":  UnstructuredExcelLoader,
+def _load_pdf(file_path: str) -> list:
+    """PDF: extrae texto página por página."""
+    return PyPDFLoader(file_path).load()
+
+
+def _load_docx(file_path: str) -> list:
+    """Word .docx moderno."""
+    return Docx2txtLoader(file_path).load()
+
+
+def _load_doc_old(file_path: str) -> list:
+    """Word .doc antiguo — usa docx2txt como fallback."""
+    try:
+        import docx2txt
+        from langchain_core.documents import Document
+        text = docx2txt.process(file_path)
+        return [Document(page_content=text, metadata={"source": file_path})]
+    except Exception as e:
+        print(f"[RAG] Fallback .doc: {e}")
+        return Docx2txtLoader(file_path).load()
+
+
+def _load_excel(file_path: str) -> list:
+    """
+    Excel .xlsx / .xls — lee cada hoja como texto tabular.
+    Usa openpyxl para xlsx y xlrd para xls.
+    """
+    from langchain_core.documents import Document
+    docs = []
+    ext  = os.path.splitext(file_path)[1].lower()
+    try:
+        if ext == ".xlsx":
+            import openpyxl
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+            for sheet_name in wb.sheetnames:
+                ws   = wb[sheet_name]
+                rows = []
+                for row in ws.iter_rows(values_only=True):
+                    row_str = "\t".join(str(c) if c is not None else "" for c in row)
+                    if row_str.strip():
+                        rows.append(row_str)
+                if rows:
+                    docs.append(Document(
+                        page_content=f"[Hoja: {sheet_name}]\n" + "\n".join(rows),
+                        metadata={"source": file_path, "sheet": sheet_name}
+                    ))
+        else:  # .xls
+            import xlrd
+            wb = xlrd.open_workbook(file_path)
+            for sheet in wb.sheets():
+                rows = []
+                for r in range(sheet.nrows):
+                    row_str = "\t".join(str(sheet.cell_value(r, c)) for c in range(sheet.ncols))
+                    if row_str.strip():
+                        rows.append(row_str)
+                if rows:
+                    docs.append(Document(
+                        page_content=f"[Hoja: {sheet.name}]\n" + "\n".join(rows),
+                        metadata={"source": file_path, "sheet": sheet.name}
+                    ))
+    except Exception as e:
+        print(f"[RAG] Error leyendo Excel, usando fallback UnstructuredExcelLoader: {e}")
+        try:
+            docs = UnstructuredExcelLoader(file_path).load()
+        except Exception as e2:
+            print(f"[RAG] Fallback Excel falló: {e2}")
+    return docs
+
+
+def _load_pptx(file_path: str) -> list:
+    """
+    PowerPoint .pptx / .ppt — extrae texto de cada diapositiva
+    y sus notas del presentador.
+    """
+    from langchain_core.documents import Document
+    docs = []
+    try:
+        from pptx import Presentation
+        prs = Presentation(file_path)
+        for i, slide in enumerate(prs.slides, start=1):
+            texts = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        line = " ".join(run.text for run in para.runs).strip()
+                        if line:
+                            texts.append(line)
+            # Notas del presentador
+            if slide.has_notes_slide:
+                notes = slide.notes_slide.notes_text_frame
+                if notes:
+                    note_text = notes.text.strip()
+                    if note_text:
+                        texts.append(f"[Notas presentador]: {note_text}")
+            if texts:
+                docs.append(Document(
+                    page_content=f"[Diapositiva {i}]\n" + "\n".join(texts),
+                    metadata={"source": file_path, "slide": i}
+                ))
+    except ImportError:
+        print("[RAG] python-pptx no instalado. Ejecuta: pip install python-pptx")
+    except Exception as e:
+        print(f"[RAG] Error cargando PPTX '{file_path}': {e}")
+    return docs
+
+
+def _load_image(file_path: str) -> list:
+    """
+    Imágenes — extrae texto mediante OCR (Tesseract).
+    Soporta: PNG, JPG, JPEG, BMP, TIFF, WEBP.
+
+    Requisitos:
+        pip install pytesseract pillow
+        Instalar Tesseract: https://github.com/UB-Mannheim/tesseract/wiki
+        (Windows: marcar idioma español en el instalador)
+    """
+    from langchain_core.documents import Document
+    try:
+        import pytesseract
+        from PIL import Image
+
+        img  = Image.open(file_path)
+        text = pytesseract.image_to_string(img, lang="spa+eng").strip()
+
+        if not text:
+            text = "[La imagen no contiene texto legible detectado por OCR]"
+
+        return [Document(
+            page_content=text,
+            metadata={"source": file_path, "type": "image_ocr"}
+        )]
+
+    except ImportError:
+        print(
+            "[RAG] Faltan dependencias para imágenes.\n"
+            "Ejecuta: pip install pytesseract pillow\n"
+            "Descarga Tesseract: https://github.com/UB-Mannheim/tesseract/wiki"
+        )
+        return []
+    except Exception as e:
+        print(f"[RAG] Error procesando imagen '{file_path}': {e}")
+        return []
+
+
+def _load_txt(file_path: str) -> list:
+    return TextLoader(file_path, encoding="utf-8").load()
+
+
+def _load_csv(file_path: str) -> list:
+    return CSVLoader(file_path, encoding="utf-8").load()
+
+
+# ─── Mapa de extensiones ──────────────────────────────────────────────────────
+
+LOADER_MAP = {
+    # PDF
+    "pdf":  _load_pdf,
+    # Word
+    "docx": _load_docx,
+    "doc":  _load_doc_old,
+    # Excel
+    "xlsx": _load_excel,
+    "xls":  _load_excel,
+    # PowerPoint
+    "pptx": _load_pptx,
+    "ppt":  _load_pptx,
+    # Texto plano
+    "txt":  _load_txt,
+    # CSV
+    "csv":  _load_csv,
+    # Imágenes (OCR)
+    "png":  _load_image,
+    "jpg":  _load_image,
+    "jpeg": _load_image,
+    "bmp":  _load_image,
+    "tiff": _load_image,
+    "tif":  _load_image,
+    "webp": _load_image,
 }
+
+EXTENSIONES_SOPORTADAS = list(LOADER_MAP.keys())
+
 
 def load_document(file_path: str, file_type: str) -> list:
     ext = file_type.lower().lstrip(".")
-    loader_fn = LOADERS.get(ext)
+    loader_fn = LOADER_MAP.get(ext)
     if not loader_fn:
         print(f"[RAG] Tipo de archivo no soportado: {ext}")
         return []
     try:
-        loader = loader_fn(file_path)
-        docs = loader.load()
+        docs = loader_fn(file_path)
         print(f"[RAG] Cargado '{file_path}': {len(docs)} sección(es)")
         return docs
     except Exception as e:
@@ -139,24 +310,19 @@ def list_indexed_documents() -> list:
 def retrieve_chunks(question: str, doc_ids: list = None, n_results: int = 6) -> tuple:
     question_embedding = EMBED_MODEL.encode([question]).tolist()[0]
 
-    where_filter = None
-    if doc_ids:
-        where_filter = (
-            {"doc_id": str(doc_ids[0])} if len(doc_ids) == 1
-            else {"doc_id": {"$in": [str(d) for d in doc_ids]}}
-        )
+    total = collection.count()
+    if total == 0:
+        return [], []
 
+    # ── Sin filtro: busca en TODOS los documentos ──
     try:
         results = collection.query(
             query_embeddings=[question_embedding],
-            n_results=min(n_results, collection.count()),
-            where=where_filter,
+            n_results=min(n_results, total),
         )
-    except Exception:
-        results = collection.query(
-            query_embeddings=[question_embedding],
-            n_results=min(n_results, collection.count()),
-        )
+    except Exception as e:
+        print(f"[RAG] Error en query: {e}")
+        return [], []
 
     docs  = results.get("documents", [[]])[0]
     metas = results.get("metadatas", [[]])[0]
@@ -166,7 +332,6 @@ def retrieve_chunks(question: str, doc_ids: list = None, n_results: int = 6) -> 
 def build_context(docs: list, metas: list) -> tuple:
     context_parts = []
     sources = []
-
     for i, (doc, meta) in enumerate(zip(docs, metas)):
         filename  = meta.get("filename", "desconocido")
         page_info = f", p.{meta['page']+1}" if meta.get("page") else ""
@@ -178,19 +343,24 @@ def build_context(docs: list, metas: list) -> tuple:
             "page":     meta.get("page", 0),
             "preview":  doc[:220] + ("..." if len(doc) > 220 else ""),
         })
-
     return "\n\n".join(context_parts), sources
 
 
 def query_rag(question: str, doc_ids: list = None, n_results: int = 6) -> dict:
 
-    # ── Respuesta a saludos sin consumir API ──────────────────────────────────
+    # ── Saludos ───────────────────────────────────────────────────────────────
     if question.strip().lower() in SALUDOS:
         return {
             "answer": (
                 "¡Hola! 👋 Soy tu asistente de documentos.\n\n"
-                "Puedes hacerme preguntas sobre los archivos que has cargado "
-                "y te responderé basándome exclusivamente en su contenido.\n\n"
+                "Puedes hacerme preguntas sobre los archivos cargados.\n\n"
+                "**Formatos soportados:**\n"
+                "- 📄 PDF\n"
+                "- 📝 Word (.docx, .doc)\n"
+                "- 📊 Excel (.xlsx, .xls)\n"
+                "- 📊 PowerPoint (.pptx, .ppt)\n"
+                "- 🖼️ Imágenes con texto (.png, .jpg, .jpeg, .bmp, .tiff)\n"
+                "- 📋 CSV y TXT\n\n"
                 "Por ejemplo:\n"
                 "- *¿De qué trata el documento?*\n"
                 "- *¿Cuáles son los puntos principales?*\n"
@@ -205,18 +375,17 @@ def query_rag(question: str, doc_ids: list = None, n_results: int = 6) -> dict:
     if not docs:
         return {
             "answer": (
-                "⚠️ No encontré información relevante en los documentos cargados. "
+                "⚠️ No encontré información relevante en los documentos cargados.\n"
                 "Verifica que los archivos estén correctamente indexados."
             ),
             "sources": [],
         }
 
-    # ── Contexto ──────────────────────────────────────────────────────────────
+    # ── Contexto y generación ─────────────────────────────────────────────────
     context, sources = build_context(docs, metas)
 
-    # ── Generación con Gemini ─────────────────────────────────────────────────
     user_message = (
-        f"A continuación tienes fragmentos extraídos de documentos técnicos:\n\n"
+        f"A continuación tienes fragmentos extraídos de documentos:\n\n"
         f"{context}\n\n"
         f"---\n"
         f"PREGUNTA: {question}\n\n"
@@ -232,19 +401,43 @@ def query_rag(question: str, doc_ids: list = None, n_results: int = 6) -> dict:
         error_msg = str(e)
         if "429" in error_msg:
             answer = (
-                "⏳ Se superó el límite de solicitudes de la API gratuita de Gemini.\n\n"
-                "Espera unos segundos e intenta de nuevo.\n\n"
-                "**Fragmentos encontrados en los documentos:**\n\n" + context
+                "⏳ Se superó el límite de la API de Gemini. Espera unos segundos.\n\n"
+                "**Fragmentos encontrados:**\n\n" + context
             )
         elif "GEMINI_API_KEY" in error_msg:
             answer = (
                 "❌ API key no configurada.\n"
-                "Ejecuta: `$env:GEMINI_API_KEY = 'AIza...'` y reinicia el servidor."
+                "Ejecuta en PowerShell:\n"
+                "`$env:GEMINI_API_KEY = 'AIza...'`\n"
+                "y reinicia el servidor."
             )
         else:
             answer = (
                 f"❌ Error al generar respuesta: {e}\n\n"
-                f"**Fragmentos encontrados en los documentos:**\n\n{context}"
+                f"**Fragmentos encontrados:**\n\n{context}"
             )
 
     return {"answer": answer, "sources": sources}
+
+
+# ─── Escaneo de carpeta local ─────────────────────────────────────────────────
+
+def scan_folder(folder_path: str) -> list:
+    files = []
+    try:
+        for root, dirs, filenames in os.walk(folder_path):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for fname in filenames:
+                ext = os.path.splitext(fname)[1].lower().lstrip(".")
+                if ext in EXTENSIONES_SOPORTADAS:
+                    full_path = os.path.join(root, fname)
+                    size = os.path.getsize(full_path)
+                    files.append({
+                        "name": fname,
+                        "path": full_path,
+                        "ext":  ext,
+                        "size": round(size / 1024, 1)
+                    })
+    except Exception as e:
+        print(f"[RAG] Error escaneando carpeta: {e}")
+    return files
