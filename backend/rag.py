@@ -51,36 +51,6 @@ REGLAS ESTRICTAS:
 7. No inventes datos, fórmulas, cifras ni procedimientos que no estén en el contexto.
 8. Responde siempre en el mismo idioma en que se formula la pregunta."""
 
-# ─── DESCRIPCIÓN COMPLETA DEL ASISTENTE ───────────────────────────────────────
-CAPACIDADES_ASISTENTE = """
-## 📋 **LO QUE PUEDO HACER POR TI:**
-
-### 📄 **Sobre Documentos:**
-- Responder preguntas sobre el contenido de tus documentos
-- Buscar información específica dentro de PDFs, Word, Excel, PPT, TXT, CSV
-- Resumir documentos completos o secciones específicas
-- Extraer datos numéricos de Excel y CSV
-- Comparar dos documentos entre sí
-
-### 📊 **Análisis y Exportación:**
-- Generar gráficas con datos de tus Excel/CSV
-- Exportar respuestas a Word (.docx) con formato profesional
-- Exportar respuestas a PDF
-- Generar informes completos de conversación
-
-### 📁 **Gestión:**
-- Decirte cuántos documentos tienes cargados
-- Listar todos tus documentos
-- Recordar sobre qué documento estás hablando
-
-### 💬 **Conversación:**
-- Recordar el historial de nuestra conversación
-- Responder en el mismo idioma que preguntas
-- Tener memoria del documento actual que discutimos
-
-**SOLO RESPONDO BASADO EN TUS DOCUMENTOS. NO INVENTO INFORMACIÓN.**
-"""
-
 SALUDOS = {
     "hola", "hi", "hello", "hey", "buenas", "buen día", "buen dia",
     "buenos días", "buenos dias", "buenas tardes", "buenas noches",
@@ -138,7 +108,7 @@ def get_documents_info() -> dict:
         print(f"[RAG] Error obteniendo info: {e}")
         return {"total": 0, "documentos": []}
 
-# ─── Limpiar documentos huérfanos ─────────────────────────────────────────────
+# ─── LIMPIEZA AUTOMÁTICA DE DOCUMENTOS HUÉRFANOS ──────────────────────────────
 def limpiar_documentos_huertanos():
     """Elimina de ChromaDB los documentos que no existen en SQLite"""
     try:
@@ -150,15 +120,19 @@ def limpiar_documentos_huertanos():
         
         all_data = collection.get()
         ids_a_eliminar = []
+        documentos_eliminados = set()
         
         for i, meta in enumerate(all_data['metadatas']):
             doc_id = meta.get('doc_id')
+            filename = meta.get('filename', 'desconocido')
             if doc_id not in ids_validos:
                 ids_a_eliminar.append(all_data['ids'][i])
+                documentos_eliminados.add(filename)
         
         if ids_a_eliminar:
             collection.delete(ids=ids_a_eliminar)
             print(f"[RAG] 🧹 Eliminados {len(ids_a_eliminar)} chunks huérfanos")
+            print(f"[RAG] 📄 Documentos eliminados del índice: {list(documentos_eliminados)}")
         else:
             print("[RAG] ✅ No hay chunks huérfanos")
             
@@ -1048,20 +1022,10 @@ def query_rag(question: str, doc_ids: list = None, n_results: int = None,
         except ImportError:
             print("[RAG] Agente no disponible")
     
-    # ─── Saludos con presentación completa ────────────────────────────────────
+    # ─── Saludos ───────────────────────────────────────────────────────────────
     if question.strip().lower() in SALUDOS:
         return {
-            "answer": f"""¡Hola! 👋 Soy tu asistente de documentos inteligente.
-
-{CAPACIDADES_ASISTENTE}
-
-**¿Cómo empezar?**
-- Sube documentos (PDF, Word, Excel, PPT, imágenes)
-- Pregúntame: "¿De qué trata este documento?"
-- Pide: "dame un resumen", "genera una gráfica", "compara documento A con B"
-- Exporta: "dame un archivo Word", "exporta a PDF"
-
-¿En qué puedo ayudarte hoy?""",
+            "answer": "¡Hola! 👋 Soy tu asistente de documentos.\n\nPuedes hacerme preguntas sobre los archivos cargados.",
             "sources": [],
             "cached": False,
             "confidence": {"score": 1.0, "level": "alta", "reason": ""}

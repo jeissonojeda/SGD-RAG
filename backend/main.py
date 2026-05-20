@@ -26,7 +26,7 @@ from backend.rag import (
     index_document, delete_document_from_index, query_rag, 
     clear_cache, scan_folder, EXTENSIONES_SOPORTADAS,
     collection, get_documents_info, get_conversation_context,
-    limpiar_documentos_huertanos, list_indexed_documents  # ← AGREGADO
+    limpiar_documentos_huertanos, list_indexed_documents
 )
 
 app = FastAPI(title="SGD-IA CESMAG", version="3.0")
@@ -72,7 +72,7 @@ class FolderImportRequest(BaseModel):
 @app.on_event("startup")
 def startup():
     create_tables()
-    limpiar_documentos_huertanos()  # ← AGREGADO: Limpia documentos huérfanos
+    limpiar_documentos_huertanos()  # Limpia documentos huérfanos al iniciar
     db = next(get_db())
     if not db.query(User).filter(User.username == "admin").first():
         admin = User(
@@ -204,6 +204,7 @@ def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: Us
     db.delete(doc)
     db.commit()
     clear_cache()
+    limpiar_documentos_huertanos()  # Limpia después de eliminar
     
     return {"message": "Documento eliminado"}
 
@@ -301,6 +302,7 @@ async def folder_import(
             results.append({"path": file_path, "status": "error", "error": str(e)})
     
     clear_cache()
+    limpiar_documentos_huertanos()  # Limpia después de importar
     
     return {"results": results, "total": len(results)}
 
@@ -368,6 +370,15 @@ def rag_stats(current_user: User = Depends(get_current_user)):
     }
 
 
+@app.post("/api/rag/clean")
+def clean_orphan_documents(current_user: User = Depends(get_current_user)):
+    """Limpia documentos huérfanos de ChromaDB (solo admin)"""
+    if current_user.role != "Administrador":
+        raise HTTPException(403, "Solo administradores")
+    limpiar_documentos_huertanos()
+    return {"message": "Limpieza completada"}
+
+
 # ─── NUEVOS ENDPOINTS PARA ESTADÍSTICAS E HISTORIAL ───────────────────────────
 
 @app.get("/api/stats")
@@ -421,10 +432,8 @@ async def user_history(user_id: int, current_user: User = Depends(get_current_us
 @app.get("/api/download/{filename}")
 async def download_file(filename: str, current_user: User = Depends(get_current_user)):
     """Descarga un archivo temporal generado por el asistente (compatible Windows/Linux)"""
-    # Buscar en tempfile.gettempdir() primero (funciona en Windows)
     temp_path = os.path.join(tempfile.gettempdir(), filename)
     
-    # Si no está en temp, buscar en /tmp (Linux/Mac)
     if not os.path.exists(temp_path):
         alt_path = os.path.join("/tmp", filename)
         if os.path.exists(alt_path):
@@ -434,7 +443,7 @@ async def download_file(filename: str, current_user: User = Depends(get_current_
         raise HTTPException(404, "El archivo no existe o expiró")
     
     def eliminar_archivo():
-        time.sleep(300)  # 5 minutos
+        time.sleep(300)
         if os.path.exists(temp_path):
             os.remove(temp_path)
             print(f"[MAIN] Archivo eliminado: {filename}")
